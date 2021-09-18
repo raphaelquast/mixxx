@@ -315,7 +315,6 @@ KAOSSDJ.tap_button_callback = function(channel, control, value, status, group) {
 	};
 };
 
-<<<<<<< HEAD
 // <SHIFT> + <TOUCHPAD X> : control super knob of QuickEffectRack for deck 1
 KAOSSDJ.controllerFxTouchMoveVertical_shift = function(channel, control, value, status, group) {
     var deck = KAOSSDJ.decks[0];
@@ -333,6 +332,3 @@ KAOSSDJ.controllerFxTouchMoveHorizontal_shift = function(channel, control, value
         engine.setValue('[QuickEffectRack1_' + deck.group + ']', 'super1', val);
     }
 };
-
-=======
->>>>>>> add functions to fully control the file browser
