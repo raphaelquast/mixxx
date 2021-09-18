@@ -6,9 +6,11 @@
 #include <QThread>
 #include <QtDebug>
 
+#include "config.h"
+#include "coreservices.h"
 #include "errordialoghandler.h"
-#include "mixxx.h"
 #include "mixxxapplication.h"
+#include "mixxxmainwindow.h"
 #include "sources/soundsourceproxy.h"
 #include "util/cmdlineargs.h"
 #include "util/console.h"
@@ -21,19 +23,75 @@ namespace {
 constexpr int kFatalErrorOnStartupExitCode = 1;
 constexpr int kParseCmdlineArgsErrorExitCode = 2;
 
-int runMixxx(MixxxApplication* app, const CmdlineArgs& args) {
-    MixxxMainWindow mainWindow(app, args);
-    // If startup produced a fatal error, then don't even start the
-    // Qt event loop.
-    if (ErrorDialogHandler::instance()->checkError()) {
-        mainWindow.finalize();
-        return kFatalErrorOnStartupExitCode;
-    } else {
-        qDebug() << "Displaying main window";
-        mainWindow.show();
+constexpr char kScaleFactorEnvVar[] = "QT_SCALE_FACTOR";
+const QString kConfigGroup = QStringLiteral("[Config]");
+const QString kScaleFactorKey = QStringLiteral("ScaleFactor");
 
-        qDebug() << "Running Mixxx";
-        return app->exec();
+int runMixxx(MixxxApplication* pApp, const CmdlineArgs& args) {
+    const auto pCoreServices = std::make_shared<mixxx::CoreServices>(args, pApp);
+
+    CmdlineArgs::Instance().parseForUserFeedback();
+
+    int exitCode;
+
+    // This scope ensures that `MixxxMainWindow` is destroyed *before*
+    // CoreServices is shut down. Otherwise a debug assertion complaining about
+    // leaked COs may be triggered.
+    {
+        MixxxMainWindow mainWindow(pCoreServices);
+        pApp->processEvents();
+        pApp->installEventFilter(&mainWindow);
+
+        QObject::connect(pCoreServices.get(),
+                &mixxx::CoreServices::initializationProgressUpdate,
+                &mainWindow,
+                &MixxxMainWindow::initializationProgressUpdate);
+        pCoreServices->initialize(pApp);
+        mainWindow.initialize();
+
+        // If startup produced a fatal error, then don't even start the
+        // Qt event loop.
+        if (ErrorDialogHandler::instance()->checkError()) {
+            exitCode = kFatalErrorOnStartupExitCode;
+        } else {
+            qDebug() << "Displaying main window";
+            mainWindow.show();
+
+            qDebug() << "Running Mixxx";
+            exitCode = pApp->exec();
+        }
+    }
+    return exitCode;
+}
+
+void adjustScaleFactor(CmdlineArgs* pArgs) {
+    if (qEnvironmentVariableIsSet(kScaleFactorEnvVar)) {
+        bool ok;
+        const double f = qgetenv(kScaleFactorEnvVar).toDouble(&ok);
+        if (ok && f > 0) {
+            // The environment variable overrides the preferences option
+            qDebug() << "Using" << kScaleFactorEnvVar << f;
+            pArgs->setScaleFactor(f);
+            return;
+        }
+    }
+    // We cannot use SettingsManager, because it depends on MixxxApplication
+    // but the scale factor is read during it's constructor.
+    // QHighDpiScaling can not be used afterwards because it is private.
+    // This means the following code may fail after down/upgrade ... a one time issue.
+
+    // Read and parse the config file from the settings path
+    auto config = ConfigObject<ConfigValue>(
+            QDir(pArgs->getSettingsPath()).filePath(MIXXX_SETTINGS_FILE),
+            QString(),
+            QString());
+    QString strScaleFactor = config.getValue(
+            ConfigKey(kConfigGroup, kScaleFactorKey));
+    double scaleFactor = strScaleFactor.toDouble();
+    if (scaleFactor > 0) {
+        qDebug() << "Using preferences ScaleFactor" << scaleFactor;
+        qputenv(kScaleFactorEnvVar, strScaleFactor.toLocal8Bit());
+        pArgs->setScaleFactor(scaleFactor);
     }
 }
 
@@ -47,9 +105,12 @@ int main(int argc, char * argv[]) {
     QCoreApplication::setOrganizationDomain("mixxx.org");
 
     // This needs to be set before initializing the QApplication.
-#if QT_VERSION >= QT_VERSION_CHECK(5, 6, 0)
     QApplication::setAttribute(Qt::AA_EnableHighDpiScaling);
     QApplication::setAttribute(Qt::AA_UseHighDpiPixmaps);
+
+    // workaround for https://bugreports.qt.io/browse/QTBUG-84363
+#if QT_VERSION >= QT_VERSION_CHECK(5, 14, 0) && QT_VERSION < QT_VERSION_CHECK(5, 15, 1)
+    qputenv("QV4_FORCE_INTERPRETER", QByteArrayLiteral("1"));
 #endif
 #if QT_VERSION >= QT_VERSION_CHECK(5, 14, 0)
     // Follow whatever factor the user has selected in the system settings
@@ -68,8 +129,7 @@ int main(int argc, char * argv[]) {
 
     // Construct a list of strings based on the command line arguments
     CmdlineArgs& args = CmdlineArgs::Instance();
-    if (!args.Parse(argc, argv)) {
-        args.printUsage();
+    if (!args.parse(argc, argv)) {
         return kParseCmdlineArgsErrorExitCode;
     }
 
@@ -86,7 +146,21 @@ int main(int argc, char * argv[]) {
     Sandbox::checkSandboxed();
 #endif
 
+    adjustScaleFactor(&args);
+
     MixxxApplication app(argc, argv);
+
+#ifdef __APPLE__
+    // TODO: At this point it is too late to provide the same settings path to all components
+    // and too early to log errors and give users advises in their system language.
+    // Calling this from main.cpp before the QApplication is initialized may cause a crash
+    // due to potential QMessageBox invocations within migrateOldSettings().
+    // Solution: Start Mixxx with default settings, migrate the preferences, and then restart
+    // immediately.
+    if (!args.getSettingsPathSet()) {
+        CmdlineArgs::Instance().setSettingsPath(Sandbox::migrateOldSettings());
+    }
+#endif
 
 #ifdef __APPLE__
     QDir dir(QApplication::applicationDirPath());

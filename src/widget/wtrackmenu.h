@@ -9,17 +9,20 @@
 #include "library/dao/playlistdao.h"
 #include "library/trackprocessing.h"
 #include "preferences/usersettings.h"
+#include "track/beats.h"
 #include "track/trackref.h"
 #include "util/color/rgbcolor.h"
+#include "util/parented_ptr.h"
 
 class ControlProxy;
 class DlgTagFetcher;
 class DlgTrackInfo;
 class ExternalTrackCollection;
-class TrackCollectionManager;
+class Library;
 class TrackModel;
 class WColorPickerAction;
 class WCoverArtMenu;
+class WSearchRelatedTracksMenu;
 
 /// A context menu for track(s).
 /// Can be used with individual track type widgets based on TrackPointer
@@ -43,15 +46,18 @@ class WTrackMenu : public QMenu {
         HideUnhidePurge = 1 << 9,
         FileBrowser = 1 << 10,
         Properties = 1 << 11,
+        SearchRelated = 1 << 12,
+        UpdateReplayGain = 1 << 13,
         TrackModelFeatures = Remove | HideUnhidePurge,
         All = AutoDJ | LoadTo | Playlist | Crate | Remove | Metadata | Reset |
-                BPM | Color | HideUnhidePurge | FileBrowser | Properties
+                BPM | Color | HideUnhidePurge | FileBrowser | Properties |
+                SearchRelated
     };
     Q_DECLARE_FLAGS(Features, Feature)
 
     WTrackMenu(QWidget* parent,
             UserSettingsPointer pConfig,
-            TrackCollectionManager* pTrackCollectionManager,
+            Library* pLibrary,
             Features flags = Feature::All,
             TrackModel* trackModel = nullptr);
     ~WTrackMenu() override;
@@ -64,7 +70,7 @@ class WTrackMenu : public QMenu {
             const QModelIndexList& trackIndexList);
 
     void loadTrack(
-            const TrackPointer& pTrack);
+            const TrackPointer& pTrack, const QString& deckGroup);
 
     // WARNING: This function hides non-virtual QMenu::popup().
     // This has been done on purpose to ensure menu doesn't popup without loaded track(s).
@@ -79,7 +85,7 @@ class WTrackMenu : public QMenu {
     void slotOpenInFileBrowser();
 
     // Row color
-    void slotColorPicked(mixxx::RgbColor::optional_t color);
+    void slotColorPicked(const mixxx::RgbColor::optional_t& color);
 
     // Reset
     void slotClearBeats();
@@ -98,9 +104,10 @@ class WTrackMenu : public QMenu {
     // BPM
     void slotLockBpm();
     void slotUnlockBpm();
-    void slotScaleBpm(int);
+    void slotScaleBpm(mixxx::Beats::BpmScale scale);
 
     // Info and metadata
+    void slotUpdateReplayGainFromPregain();
     void slotShowDlgTagFetcher();
     void slotImportMetadataFromFileTags();
     void slotExportMetadataIntoFileTags();
@@ -178,11 +185,14 @@ class WTrackMenu : public QMenu {
     std::optional<std::optional<mixxx::RgbColor>> getCommonTrackColor() const;
     CoverInfo getCoverInfoOfLastTrack() const;
 
-    TrackModel* m_pTrackModel{};
+    TrackModel* const m_pTrackModel;
     QModelIndexList m_trackIndexList;
 
-    // Source of track list when TrackModel is not set.
-    TrackPointerList m_trackPointerList;
+    /// Track being referenced when TrackModel is not set.
+    TrackPointer m_pTrack;
+    /// If the user right clicked on a track in a deck, this will record which
+    /// deck made the request.
+    QString m_deckGroup;
 
     const ControlProxy* m_pNumSamplers{};
     const ControlProxy* m_pNumDecks{};
@@ -200,6 +210,10 @@ class WTrackMenu : public QMenu {
     QMenu* m_pBPMMenu{};
     QMenu* m_pColorMenu{};
     WCoverArtMenu* m_pCoverMenu{};
+    parented_ptr<WSearchRelatedTracksMenu> m_pSearchRelatedMenu;
+
+    // Update ReplayGain from Track
+    QAction* m_pUpdateReplayGain{};
 
     // Reload Track Metadata Action:
     QAction* m_pImportMetadataFromFileAct{};
@@ -259,7 +273,7 @@ class WTrackMenu : public QMenu {
     QAction* m_pClearAllMetadataAction{};
 
     const UserSettingsPointer m_pConfig;
-    TrackCollectionManager* const m_pTrackCollectionManager;
+    Library* const m_pLibrary;
 
     std::unique_ptr<DlgTrackInfo> m_pDlgTrackInfo;
     std::unique_ptr<DlgTagFetcher> m_pDlgTagFetcher;

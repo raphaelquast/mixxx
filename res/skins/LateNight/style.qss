@@ -437,6 +437,9 @@ WSpinny { /*
 #RateControls {
   qproperty-layoutAlignment: 'AlignHCenter | AlignBottom';
 }
+#RateSliderBoxCompactSync {
+  margin-left: 5px;
+}
 /************** Decks  ********************************************************/
 
 
@@ -718,7 +721,7 @@ WEffectSelector {
 
 
 
-/************** Skin setttings ************************************************/
+/************** Skin settings *************************************************/
 
 #SkinSettings {
   qproperty-layoutAlignment: 'AlignLeft | AlignTop';

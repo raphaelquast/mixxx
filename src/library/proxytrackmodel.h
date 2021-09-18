@@ -22,7 +22,7 @@ class ProxyTrackModel : public QSortFilterProxyModel, public TrackModel {
     ~ProxyTrackModel() override;
 
     // Inherited from TrackModel
-    CapabilitiesFlags getCapabilities() const final;
+    Capabilities getCapabilities() const final;
     TrackPointer getTrack(const QModelIndex& index) const final;
     TrackPointer getTrackByRef(const TrackRef& trackRef) const final;
     QString getTrackLocation(const QModelIndex& index) const final;
@@ -40,6 +40,14 @@ class ProxyTrackModel : public QSortFilterProxyModel, public TrackModel {
     bool setModelSetting(const QString& name, const QVariant& value) final;
     TrackModel::SortColumnId sortColumnIdFromColumnIndex(int index) const override;
     int columnIndexFromSortColumnId(TrackModel::SortColumnId sortColumn) const override;
+    bool updateTrackGenre(
+            Track* pTrack,
+            const QString& genre) const override;
+#if defined(__EXTRA_METADATA__)
+    bool updateTrackMood(
+            Track* pTrack,
+            const QString& mood) const override;
+#endif // __EXTRA_METADATA__
 
     // Inherited from QSortFilterProxyModel
     bool filterAcceptsRow(int sourceRow, const QModelIndex& sourceParent) const final;
