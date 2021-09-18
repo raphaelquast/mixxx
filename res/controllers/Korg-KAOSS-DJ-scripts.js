@@ -332,3 +332,4 @@ KAOSSDJ.controllerFxTouchMoveHorizontal_shift = function(channel, control, value
         engine.setValue('[QuickEffectRack1_' + deck.group + ']', 'super1', val);
     }
 };
+

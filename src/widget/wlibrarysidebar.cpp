@@ -45,9 +45,9 @@ void WLibrarySidebar::dragEnterEvent(QDragEnterEvent * event) {
         // drag so for now we accept all drags. Since almost every
         // LibraryFeature accepts all files in the drop and accepts playlist
         // drops we default to those flags to DragAndDropHelper.
-        QList<TrackFile> files = DragAndDropHelper::supportedTracksFromUrls(
+        QList<mixxx::FileInfo> fileInfos = DragAndDropHelper::supportedTracksFromUrls(
                 event->mimeData()->urls(), false, true);
-        if (!files.isEmpty()) {
+        if (!fileInfos.isEmpty()) {
             event->acceptProposedAction();
             return;
         }
@@ -208,6 +208,26 @@ void WLibrarySidebar::keyPressEvent(QKeyEvent* event) {
     //    // encoder click via "GoToItem"
     //    qDebug() << "GoToItem";
     //    TODO(xxx) decide what todo here instead of in librarycontrol
+    } else if (event->key() == Qt::Key_Left) {
+        auto selModel = selectionModel();
+        QModelIndexList selectedRows = selModel->selectedRows();
+        if (selectedRows.isEmpty()) {
+            return;
+        }
+        // If an expanded item is selected let QTreeView collapse it
+        QModelIndex selIndex = selectedRows.first();
+        DEBUG_ASSERT(selIndex.isValid());
+        if (isExpanded(selIndex)) {
+            QTreeView::keyPressEvent(event);
+            return;
+        }
+        // Else jump to its parent and activate it
+        QModelIndex parentIndex = selIndex.parent();
+        if (parentIndex.isValid()) {
+            selectIndex(parentIndex);
+            emit pressed(parentIndex);
+        }
+        return;
     }
 
     // Fall through to default handler.
@@ -215,14 +235,51 @@ void WLibrarySidebar::keyPressEvent(QKeyEvent* event) {
 }
 
 void WLibrarySidebar::selectIndex(const QModelIndex& index) {
+    //qDebug() << "WLibrarySidebar::selectIndex" << index;
+    if (!index.isValid()) {
+        return;
+    }
     auto* pModel = new QItemSelectionModel(model());
     pModel->select(index, QItemSelectionModel::Select);
-    setSelectionModel(pModel);
-
+    if (selectionModel()) {
+        selectionModel()->deleteLater();
+    }
     if (index.parent().isValid()) {
         expand(index.parent());
     }
+    setSelectionModel(pModel);
+    setCurrentIndex(index);
     scrollTo(index);
+}
+
+/// Selects a child index from a feature and ensures visibility
+void WLibrarySidebar::selectChildIndex(const QModelIndex& index, bool selectItem) {
+    SidebarModel* sidebarModel = qobject_cast<SidebarModel*>(model());
+    VERIFY_OR_DEBUG_ASSERT(sidebarModel) {
+        qDebug() << "model() is not SidebarModel";
+        return;
+    }
+    QModelIndex translated = sidebarModel->translateChildIndex(index);
+    if (!translated.isValid()) {
+        return;
+    }
+
+    if (selectItem) {
+        auto* pModel = new QItemSelectionModel(sidebarModel);
+        pModel->select(translated, QItemSelectionModel::Select);
+        if (selectionModel()) {
+            selectionModel()->deleteLater();
+        }
+        setSelectionModel(pModel);
+        setCurrentIndex(translated);
+    }
+
+    QModelIndex parentIndex = translated.parent();
+    while (parentIndex.isValid()) {
+        expand(parentIndex);
+        parentIndex = parentIndex.parent();
+    }
+    scrollTo(translated, EnsureVisible);
 }
 
 bool WLibrarySidebar::event(QEvent* pEvent) {

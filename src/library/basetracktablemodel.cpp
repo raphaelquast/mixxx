@@ -18,6 +18,7 @@
 #include "util/assert.h"
 #include "util/compatibility.h"
 #include "util/datetime.h"
+#include "util/db/sqlite.h"
 #include "util/logger.h"
 #include "widget/wlibrary.h"
 #include "widget/wtracktableview.h"
@@ -54,6 +55,7 @@ const QStringList kDefaultTableColumns = {
         LIBRARYTABLE_REPLAYGAIN,
         LIBRARYTABLE_SAMPLERATE,
         LIBRARYTABLE_TIMESPLAYED,
+        LIBRARYTABLE_LAST_PLAYED_AT,
         LIBRARYTABLE_TITLE,
         LIBRARYTABLE_TRACKNUMBER,
         LIBRARYTABLE_YEAR,
@@ -94,13 +96,11 @@ QStringList BaseTrackTableModel::defaultTableColumns() {
 }
 
 BaseTrackTableModel::BaseTrackTableModel(
-        const char* settingsNamespace,
+        QObject* parent,
         TrackCollectionManager* pTrackCollectionManager,
-        QObject* parent)
+        const char* settingsNamespace)
         : QAbstractTableModel(parent),
-          TrackModel(
-                  cloneDatabase(pTrackCollectionManager),
-                  settingsNamespace),
+          TrackModel(cloneDatabase(pTrackCollectionManager), settingsNamespace),
           m_pTrackCollectionManager(pTrackCollectionManager),
           m_previewDeckGroup(PlayerManager::groupForPreviewDeck(0)),
           m_backgroundColorOpacity(WLibrary::kDefaultTrackTableBackgroundColorOpacity) {
@@ -167,6 +167,10 @@ void BaseTrackTableModel::initHeaderProperties() {
     setHeaderProperties(
             ColumnCache::COLUMN_LIBRARYTABLE_DATETIMEADDED,
             tr("Date Added"),
+            defaultColumnWidth() * 3);
+    setHeaderProperties(
+            ColumnCache::COLUMN_LIBRARYTABLE_LAST_PLAYED_AT,
+            tr("Last Played"),
             defaultColumnWidth() * 3);
     setHeaderProperties(
             ColumnCache::COLUMN_LIBRARYTABLE_DURATION,
@@ -614,11 +618,35 @@ QVariant BaseTrackTableModel::roleValue(
             return QString("(%1)").arg(timesPlayed);
         }
         case ColumnCache::COLUMN_LIBRARYTABLE_DATETIMEADDED:
-        case ColumnCache::COLUMN_PLAYLISTTRACKSTABLE_DATETIMEADDED:
+        case ColumnCache::COLUMN_PLAYLISTTRACKSTABLE_DATETIMEADDED: {
             VERIFY_OR_DEBUG_ASSERT(rawValue.canConvert<QDateTime>()) {
                 return QVariant();
             }
-            return mixxx::localDateTimeFromUtc(rawValue.toDateTime());
+            QDateTime dt = mixxx::localDateTimeFromUtc(rawValue.toDateTime());
+            if (role == Qt::ToolTipRole || role == kDataExportRole) {
+                return dt;
+            }
+            return dt.date();
+        }
+        case ColumnCache::COLUMN_LIBRARYTABLE_LAST_PLAYED_AT: {
+            QDateTime lastPlayedAt;
+            if (rawValue.type() == QVariant::String) {
+                // column value
+                lastPlayedAt = mixxx::sqlite::readGeneratedTimestamp(rawValue);
+            } else {
+                // cached in memory (local time)
+                lastPlayedAt = rawValue.toDateTime().toUTC();
+            }
+            if (!lastPlayedAt.isValid()) {
+                return QVariant();
+            }
+            DEBUG_ASSERT(lastPlayedAt.timeSpec() == Qt::UTC);
+            QDateTime dt = mixxx::localDateTimeFromUtc(lastPlayedAt);
+            if (role == Qt::ToolTipRole || role == kDataExportRole) {
+                return dt;
+            }
+            return dt.date();
+        }
         case ColumnCache::COLUMN_LIBRARYTABLE_BPM: {
             mixxx::Bpm bpm;
             if (!rawValue.isNull()) {
@@ -636,11 +664,11 @@ QVariant BaseTrackTableModel::roleValue(
                     bpm = mixxx::Bpm(bpmValue);
                 }
             }
-            if (bpm.hasValue()) {
+            if (bpm.isValid()) {
                 if (role == Qt::ToolTipRole || role == kDataExportRole) {
-                    return QString::number(bpm.getValue(), 'f', 4);
+                    return QString::number(bpm.value(), 'f', 4);
                 } else {
-                    return QString::number(bpm.getValue(), 'f', 1);
+                    return QString::number(bpm.value(), 'f', 1);
                 }
             } else {
                 return QChar('-');
@@ -754,7 +782,10 @@ QVariant BaseTrackTableModel::roleValue(
         case ColumnCache::COLUMN_LIBRARYTABLE_BPM: {
             bool ok;
             const auto bpmValue = rawValue.toDouble(&ok);
-            return ok ? bpmValue : mixxx::Bpm().getValue();
+            if (!ok) {
+                return mixxx::Bpm::kValueUndefined;
+            }
+            return mixxx::Bpm{bpmValue}.valueOr(mixxx::Bpm::kValueUndefined);
         }
         case ColumnCache::COLUMN_LIBRARYTABLE_TIMESPLAYED:
             return index.sibling(
@@ -846,6 +877,7 @@ Qt::ItemFlags BaseTrackTableModel::readWriteFlags(
             column == fieldIndex(ColumnCache::COLUMN_LIBRARYTABLE_COLOR) ||
             column == fieldIndex(ColumnCache::COLUMN_LIBRARYTABLE_COVERART) ||
             column == fieldIndex(ColumnCache::COLUMN_LIBRARYTABLE_DATETIMEADDED) ||
+            column == fieldIndex(ColumnCache::COLUMN_LIBRARYTABLE_LAST_PLAYED_AT) ||
             column == fieldIndex(ColumnCache::COLUMN_LIBRARYTABLE_DURATION) ||
             column == fieldIndex(ColumnCache::COLUMN_LIBRARYTABLE_FILETYPE) ||
             column == fieldIndex(ColumnCache::COLUMN_TRACKLOCATIONSTABLE_LOCATION) ||
@@ -892,7 +924,7 @@ QList<QUrl> BaseTrackTableModel::collectUrls(
             continue;
         }
         visitedRows.insert(index.row());
-        QUrl url = TrackFile(getTrackLocation(index)).toUrl();
+        QUrl url = mixxx::FileInfo(getTrackLocation(index)).toQUrl();
         if (url.isValid()) {
             urls.append(url);
         }
@@ -1005,10 +1037,24 @@ void BaseTrackTableModel::emitDataChangedForMultipleRowsInColumn(
 
 TrackPointer BaseTrackTableModel::getTrackByRef(
         const TrackRef& trackRef) const {
-    return m_pTrackCollectionManager->internalCollection()->getTrackByRef(trackRef);
+    return m_pTrackCollectionManager->getTrackByRef(trackRef);
 }
 
 TrackId BaseTrackTableModel::doGetTrackId(
         const TrackPointer& pTrack) const {
     return pTrack ? pTrack->getId() : TrackId();
 }
+
+bool BaseTrackTableModel::updateTrackGenre(
+        Track* pTrack,
+        const QString& genre) const {
+    return m_pTrackCollectionManager->updateTrackGenre(pTrack, genre);
+}
+
+#if defined(__EXTRA_METADATA__)
+bool BaseTrackTableModel::updateTrackMood(
+        Track* pTrack,
+        const QString& mood) const {
+    return m_pTrackCollectionManager->updateTrackMood(pTrack, mood);
+}
+#endif // __EXTRA_METADATA__

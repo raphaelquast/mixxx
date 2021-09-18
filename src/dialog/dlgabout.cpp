@@ -109,6 +109,7 @@ DlgAbout::DlgAbout()
             << "Waylon Robertson"
             << "Al Hadebe"
             << "Javier Vilarroig"
+            << "Ball&oacute; Gy&ouml;rgy"
             << "Pino Toscano"
             << "Alexander Horner"
             << "Michael Ehlen";

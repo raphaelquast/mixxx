@@ -14,12 +14,9 @@
 class ControlProxy;
 class DlgTagFetcher;
 class DlgTrackInfo;
-class TrackCollectionManager;
 class ExternalTrackCollection;
+class Library;
 class WTrackMenu;
-
-const QString WTRACKTABLEVIEW_VSCROLLBARPOS_KEY = "VScrollBarPos"; /** ConfigValue key for QTable vertical scrollbar position */
-const QString LIBRARY_CONFIGVALUE = "[Library]"; /** ConfigValue "value" (wtf) for library stuff */
 
 class WTrackTableView : public WLibraryTableView {
     Q_OBJECT
@@ -27,7 +24,7 @@ class WTrackTableView : public WLibraryTableView {
     WTrackTableView(
             QWidget* parent,
             UserSettingsPointer pConfig,
-            TrackCollectionManager* pTrackCollectionManager,
+            Library* pLibrary,
             double backgroundColorOpacity,
             bool sorting);
     ~WTrackTableView() override;
@@ -97,7 +94,7 @@ class WTrackTableView : public WLibraryTableView {
     void initTrackMenu();
 
     const UserSettingsPointer m_pConfig;
-    TrackCollectionManager* const m_pTrackCollectionManager;
+    Library* const m_pLibrary;
 
     // Context menu container
     parented_ptr<WTrackMenu> m_pTrackMenu;

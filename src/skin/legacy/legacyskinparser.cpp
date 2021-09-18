@@ -17,6 +17,7 @@
 #include "controllers/keyboard/keyboardeventfilter.h"
 #include "effects/effectsmanager.h"
 #include "library/library.h"
+#include "library/library_prefs.h"
 #include "mixer/basetrackplayer.h"
 #include "mixer/playermanager.h"
 #include "moc_legacyskinparser.cpp"
@@ -1033,7 +1034,7 @@ QWidget* LegacySkinParser::parseText(const QDomElement& node) {
 
     WTrackText* pTrackText = new WTrackText(m_pParent,
             m_pConfig,
-            m_pLibrary->trackCollections(),
+            m_pLibrary,
             group);
     setupLabelWidget(node, pTrackText);
 
@@ -1064,7 +1065,7 @@ QWidget* LegacySkinParser::parseTrackProperty(const QDomElement& node) {
     WTrackProperty* pTrackProperty = new WTrackProperty(
             m_pParent,
             m_pConfig,
-            m_pLibrary->trackCollections(),
+            m_pLibrary,
             group);
     setupLabelWidget(node, pTrackProperty);
 
@@ -1104,7 +1105,7 @@ QWidget* LegacySkinParser::parseTrackWidgetGroup(const QDomElement& node) {
     WTrackWidgetGroup* pGroup = new WTrackWidgetGroup(
             m_pParent,
             m_pConfig,
-            m_pLibrary->trackCollections(),
+            m_pLibrary,
             group);
     commonWidgetSetup(node, pGroup);
     pGroup->setup(node, *m_pContext);
@@ -1295,7 +1296,7 @@ QWidget* LegacySkinParser::parseSearchBox(const QDomElement& node) {
     // to changes in the configuration.
     const auto searchDebouncingTimeoutMillis =
             m_pConfig->getValue(
-                    ConfigKey("[Library]","SearchDebouncingTimeoutMillis"),
+                    mixxx::library::prefs::kSearchDebouncingTimeoutMillisConfigKey,
                     WSearchLineEdit::kDefaultDebouncingTimeoutMillis);
     WSearchLineEdit::setDebouncingTimeoutMillis(searchDebouncingTimeoutMillis);
 

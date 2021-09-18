@@ -25,17 +25,34 @@ if(POLICY CMP0071)
   cmake_policy(SET CMP0071 NEW)
 endif()
 
-# Check if any relevant env vars were set from the build env scripts
-if(DEFINED ENV{X_VCPKG_APPLOCAL_DEPS_INSTALL} AND NOT DEFINED X_VCPKG_APPLOCAL_DEPS_INSTALL)
-  set(X_VCPKG_APPLOCAL_DEPS_INSTALL "$ENV{X_VCPKG_APPLOCAL_DEPS_INSTALL}" CACHE BOOL "")
+# Set up vcpkg
+if(DEFINED ENV{VCPKG_ROOT} AND NOT DEFINED VCPKG_ROOT)
+    set(VCPKG_ROOT "$ENV{VCPKG_ROOT}")
 endif()
 
-if(DEFINED ENV{VCPKG_DEFAULT_TRIPLET} AND NOT DEFINED VCPKG_TARGET_TRIPLET)
-  set(VCPKG_TARGET_TRIPLET "$ENV{VCPKG_DEFAULT_TRIPLET}" CACHE STRING "")
-endif()
+if(DEFINED VCPKG_ROOT)
+  set(X_VCPKG_APPLOCAL_DEPS_INSTALL TRUE)
 
-if(DEFINED ENV{VCPKG_ROOT} AND NOT DEFINED CMAKE_TOOLCHAIN_FILE)
-  set(CMAKE_TOOLCHAIN_FILE "$ENV{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake" CACHE STRING "")
+  if(NOT DEFINED VCPKG_OVERLAY_PORTS)
+    set(VCPKG_OVERLAY_PORTS "${VCPKG_ROOT}/overlay/ports")
+    if(APPLE)
+        list(APPEND VCPKG_OVERLAY_PORTS "${VCPKG_ROOT}/overlay/osx")
+    elseif(WIN32)
+        list(APPEND VCPKG_OVERLAY_PORTS "${VCPKG_ROOT}/overlay/windows")
+    endif()
+  endif()
+
+  if(NOT DEFINED VCPKG_OVERLAY_TRIPLETS)
+    set(VCPKG_OVERLAY_TRIPLETS "${VCPKG_ROOT}/overlay/triplets")
+  endif()
+
+  if(DEFINED ENV{VCPKG_DEFAULT_TRIPLET})
+    set(VCPKG_TARGET_TRIPLET "$ENV{VCPKG_DEFAULT_TRIPLET}")
+  endif()
+
+  if(NOT DEFINED CMAKE_TOOLCHAIN_FILE)
+    set(CMAKE_TOOLCHAIN_FILE "${VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake" CACHE STRING "")
+  endif()
 endif()
 
 # Set a default build type if none was specified
@@ -58,9 +75,16 @@ if(NOT CMAKE_CONFIGURATION_TYPES)
   endif()
 endif()
 
-project(mixxx VERSION 2.3.1)
+if(APPLE)
+  # Minimum macOS version supported by Qt 5.12
+  set(CMAKE_OSX_DEPLOYMENT_TARGET 10.12 CACHE STRING "Minimum macOS version the build will be able to run on" FORCE)
+  # Needed for deployment target < 10.14
+  add_compile_options(-fno-aligned-allocation)
+endif()
+
+project(mixxx VERSION 2.4.0)
 # Work around missing version suffixes support https://gitlab.kitware.com/cmake/cmake/-/issues/16716
-set(MIXXX_VERSION_PRERELEASE "") # set to "alpha-pre" "beta" or ""
+set(MIXXX_VERSION_PRERELEASE "alpha-pre") # set to "alpha-pre" "beta" or ""
 
 set(CMAKE_PROJECT_HOMEPAGE_URL "https://www.mixxx.org")
 set(CMAKE_PROJECT_DESCRIPTION "Mixxx is Free DJ software that gives you everything you need to perform live mixes.")
@@ -76,6 +100,7 @@ include(CheckSymbolExists)
 include(ExternalProject)
 include(GNUInstallDirs)
 include(DefaultOption)
+include(IsStaticLibrary)
 
 #######################################################################
 # Compilers and toolchains
@@ -94,10 +119,6 @@ else()
   set(LLVM_CLANG false)
 endif()
 
-if(APPLE AND CMAKE_OSX_DEPLOYMENT_TARGET VERSION_LESS 10.14)
-  add_compile_options(-fno-aligned-allocation)
-endif()
-
 # CMake implicitly sets the variable MSVC to true for Microsoft
 # Visual C++ or another compiler simulating Visual C++.
 # https://cmake.org/cmake/help/latest/variable/MSVC.html
@@ -105,6 +126,10 @@ endif()
 #######################################################################
 
 set(CMAKE_CXX_STANDARD 17)
+if(MSVC)
+  # Ensure MSVC populates __cplusplus correctly.
+  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} /Zc:__cplusplus")
+endif()
 
 # Speed up builds on HDDs and prevent wearing of SDDs
 #
@@ -113,6 +138,16 @@ set(CMAKE_CXX_STANDARD 17)
 cmake_dependent_option(BUILD_LOW_MEMORY "Store temporary build files on disk by disabling the build option -pipe" OFF "GNU_GCC OR LLVM_CLANG" ON)
 if(NOT BUILD_LOW_MEMORY)
   add_compile_options(-pipe)
+endif()
+
+# Coverage
+#
+# This is only available with GCC, therefore this option is forcibly set to OFF
+# for all other compilers.
+cmake_dependent_option(COVERAGE "Coverage (i.e. gcov) support" OFF "GNU_GCC" OFF)
+if(COVERAGE)
+  add_compile_options(--coverage -fprofile-arcs -ftest-coverage)
+  add_link_options(--coverage -fprofile-arcs -ftest-coverage)
 endif()
 
 # Profiling
@@ -349,6 +384,10 @@ elseif(GNU_GCC OR LLVM_CLANG)
   endif()
 endif()
 
+set(CMAKE_C_VISIBILITY_PRESET hidden)
+set(CMAKE_CXX_VISIBILITY_PRESET hidden)
+set(CMAKE_VISIBILITY_INLINES_HIDDEN TRUE)
+
 if(WIN32)
   # Add support for lib prefix on Windows
   set(CMAKE_FIND_LIBRARY_PREFIXES "" "lib")
@@ -365,7 +404,8 @@ if(MSVC)
   default_option(SCCACHE_SUPPORT "Enable sccache support" "SCCACHE_EXECUTABLE")
   message(STATUS "Support for sccache: ${SCCACHE_SUPPORT}")
   if(SCCACHE_SUPPORT)
-    set_property(GLOBAL PROPERTY RULE_LAUNCH_COMPILE "sccache")
+    set( CMAKE_C_COMPILER_LAUNCHER "${SCCACHE_EXECUTABLE}" )
+    set( CMAKE_CXX_COMPILER_LAUNCHER "${SCCACHE_EXECUTABLE}" )
   endif()
 else()
   # ccache support
@@ -381,8 +421,8 @@ else()
       # without this compiler messages in `make` backend would be uncolored
       set(CMAKE_CXX_FLAGS  "${CMAKE_CXX_FLAGS} -fdiagnostics-color=${BUILD_COLORS}")
     endif()
-    set_property(GLOBAL PROPERTY RULE_LAUNCH_COMPILE "ccache")
-    set_property(GLOBAL PROPERTY RULE_LAUNCH_LINK "ccache")
+    set( CMAKE_C_COMPILER_LAUNCHER "${CCACHE_EXECUTABLE}" )
+    set( CMAKE_CXX_COMPILER_LAUNCHER "${CCACHE_EXECUTABLE}" )
   endif()
   message(STATUS "Support for ccache: ${CCACHE_SUPPORT}")
 endif()
@@ -416,6 +456,7 @@ add_library(mixxx-lib STATIC EXCLUDE_FROM_ALL
   src/control/controleffectknob.cpp
   src/control/controlencoder.cpp
   src/control/controlindicator.cpp
+  src/control/controlindicatortimer.cpp
   src/control/controllinpotmeter.cpp
   src/control/controllogpotmeter.cpp
   src/control/controlmodel.cpp
@@ -425,21 +466,18 @@ add_library(mixxx-lib STATIC EXCLUDE_FROM_ALL
   src/control/controlproxy.cpp
   src/control/controlpushbutton.cpp
   src/control/controlttrotary.cpp
-  src/controllers/colormapper.cpp
-  src/controllers/colormapperjsproxy.cpp
   src/controllers/controller.cpp
   src/controllers/controllerdebug.cpp
-  src/controllers/controllerengine.cpp
   src/controllers/controllerenumerator.cpp
   src/controllers/controllerinputmappingtablemodel.cpp
   src/controllers/controllerlearningeventfilter.cpp
   src/controllers/controllermanager.cpp
   src/controllers/controllermappingtablemodel.cpp
+  src/controllers/controllermappinginfo.cpp
+  src/controllers/controllermappinginfoenumerator.cpp
   src/controllers/controlleroutputmappingtablemodel.cpp
-  src/controllers/controllerpresetfilehandler.cpp
-  src/controllers/controllerpresetinfo.cpp
-  src/controllers/controllerpresetinfoenumerator.cpp
   src/controllers/controlpickermenu.cpp
+  src/controllers/legacycontrollermappingfilehandler.cpp
   src/controllers/delegates/controldelegate.cpp
   src/controllers/delegates/midibytedelegate.cpp
   src/controllers/delegates/midichanneldelegate.cpp
@@ -451,11 +489,19 @@ add_library(mixxx-lib STATIC EXCLUDE_FROM_ALL
   src/controllers/dlgprefcontrollerdlg.ui
   src/controllers/dlgprefcontrollers.cpp
   src/controllers/dlgprefcontrollersdlg.ui
+  src/controllers/scripting/controllerscriptenginebase.cpp
+  src/controllers/scripting/controllerscriptmoduleengine.cpp
+  src/controllers/scripting/colormapper.cpp
+  src/controllers/scripting/colormapperjsproxy.cpp
+  src/controllers/scripting/legacy/controllerscriptenginelegacy.cpp
+  src/controllers/scripting/legacy/controllerscriptinterfacelegacy.cpp
+  src/controllers/scripting/legacy/scriptconnection.cpp
+  src/controllers/scripting/legacy/scriptconnectionjsproxy.cpp
   src/controllers/keyboard/keyboardeventfilter.cpp
   src/controllers/learningutils.cpp
+  src/controllers/midi/legacymidicontrollermapping.cpp
+  src/controllers/midi/legacymidicontrollermappingfilehandler.cpp
   src/controllers/midi/midicontroller.cpp
-  src/controllers/midi/midicontrollerpreset.cpp
-  src/controllers/midi/midicontrollerpresetfilehandler.cpp
   src/controllers/midi/midienumerator.cpp
   src/controllers/midi/midimessage.cpp
   src/controllers/midi/midioutputhandler.cpp
@@ -469,6 +515,8 @@ add_library(mixxx-lib STATIC EXCLUDE_FROM_ALL
   src/dialog/dlgaboutdlg.ui
   src/dialog/dlgdevelopertools.cpp
   src/dialog/dlgdevelopertoolsdlg.ui
+  src/dialog/dlgkeywheel.cpp
+  src/dialog/dlgkeywheel.ui
   src/dialog/dlgreplacecuecolor.cpp
   src/dialog/dlgreplacecuecolordlg.ui
   src/effects/builtin/autopaneffect.cpp
@@ -485,6 +533,7 @@ add_library(mixxx-lib STATIC EXCLUDE_FROM_ALL
   src/effects/builtin/linkwitzriley8eqeffect.cpp
   src/effects/builtin/loudnesscontoureffect.cpp
   src/effects/builtin/metronomeeffect.cpp
+  src/effects/builtin/whitenoiseeffect.cpp
   src/effects/builtin/moogladder4filtereffect.cpp
   src/effects/builtin/parametriceqeffect.cpp
   src/effects/builtin/phasereffect.cpp
@@ -506,7 +555,6 @@ add_library(mixxx-lib STATIC EXCLUDE_FROM_ALL
   src/effects/effectslot.cpp
   src/effects/effectsmanager.cpp
   src/encoder/encoder.cpp
-  src/encoder/encoderbroadcastsettings.cpp
   src/encoder/encoderfdkaac.cpp
   src/encoder/encoderfdkaacsettings.cpp
   src/encoder/encoderflacsettings.cpp
@@ -569,7 +617,6 @@ add_library(mixxx-lib STATIC EXCLUDE_FROM_ALL
   src/engine/sidechain/enginesidechain.cpp
   src/engine/sidechain/networkinputstreamworker.cpp
   src/engine/sidechain/networkoutputstreamworker.cpp
-  src/engine/sync/basesyncablelistener.cpp
   src/engine/sync/enginesync.cpp
   src/engine/sync/internalclock.cpp
   src/engine/sync/synccontrol.cpp
@@ -586,10 +633,8 @@ add_library(mixxx-lib STATIC EXCLUDE_FROM_ALL
   src/library/baseexternallibraryfeature.cpp
   src/library/baseexternalplaylistmodel.cpp
   src/library/baseexternaltrackmodel.cpp
-  src/library/baseplaylistfeature.cpp
   src/library/basesqltablemodel.cpp
   src/library/basetrackcache.cpp
-  src/library/basetracksetfeature.cpp
   src/library/basetracktablemodel.cpp
   src/library/bpmdelegate.cpp
   src/library/browse/browsefeature.cpp
@@ -602,10 +647,6 @@ add_library(mixxx-lib STATIC EXCLUDE_FROM_ALL
   src/library/coverartcache.cpp
   src/library/coverartdelegate.cpp
   src/library/coverartutils.cpp
-  src/library/crate/cratefeature.cpp
-  src/library/crate/cratefeaturehelper.cpp
-  src/library/crate/cratestorage.cpp
-  src/library/crate/cratetablemodel.cpp
   src/library/dao/analysisdao.cpp
   src/library/dao/autodjcratesdao.cpp
   src/library/dao/cuedao.cpp
@@ -635,6 +676,7 @@ add_library(mixxx-lib STATIC EXCLUDE_FROM_ALL
   src/library/externaltrackcollection.cpp
   src/library/hiddentablemodel.cpp
   src/library/itunes/itunesfeature.cpp
+  src/library/library_prefs.cpp
   src/library/library.cpp
   src/library/librarycontrol.cpp
   src/library/libraryfeature.cpp
@@ -646,7 +688,6 @@ add_library(mixxx-lib STATIC EXCLUDE_FROM_ALL
   src/library/parsercsv.cpp
   src/library/parserm3u.cpp
   src/library/parserpls.cpp
-  src/library/playlistfeature.cpp
   src/library/playlisttablemodel.cpp
   src/library/previewbuttondelegate.cpp
   src/library/proxytrackmodel.cpp
@@ -666,7 +707,6 @@ add_library(mixxx-lib STATIC EXCLUDE_FROM_ALL
   src/library/searchqueryparser.cpp
   src/library/serato/seratofeature.cpp
   src/library/serato/seratoplaylistmodel.cpp
-  src/library/setlogfeature.cpp
   src/library/sidebarmodel.cpp
   src/library/stardelegate.cpp
   src/library/stareditor.cpp
@@ -678,6 +718,15 @@ add_library(mixxx-lib STATIC EXCLUDE_FROM_ALL
   src/library/trackloader.cpp
   src/library/trackmodeliterator.cpp
   src/library/trackprocessing.cpp
+  src/library/trackset/baseplaylistfeature.cpp
+  src/library/trackset/basetracksetfeature.cpp
+  src/library/trackset/crate/cratefeature.cpp
+  src/library/trackset/crate/cratefeaturehelper.cpp
+  src/library/trackset/crate/cratestorage.cpp
+  src/library/trackset/crate/cratetablemodel.cpp
+  src/library/trackset/playlistfeature.cpp
+  src/library/trackset/setlogfeature.cpp
+  src/library/trackset/tracksettablemodel.cpp
   src/library/traktor/traktorfeature.cpp
   src/library/treeitem.cpp
   src/library/treeitemmodel.cpp
@@ -691,8 +740,9 @@ add_library(mixxx-lib STATIC EXCLUDE_FROM_ALL
   src/mixer/previewdeck.cpp
   src/mixer/sampler.cpp
   src/mixer/samplerbank.cpp
-  src/mixxx.cpp
+  src/coreservices.cpp
   src/mixxxapplication.cpp
+  src/mixxxmainwindow.cpp
   src/musicbrainz/chromaprinter.cpp
   src/musicbrainz/crc.cpp
   src/musicbrainz/gzip.cpp
@@ -704,10 +754,6 @@ add_library(mixxx-lib STATIC EXCLUDE_FROM_ALL
   src/network/jsonwebtask.cpp
   src/network/networktask.cpp
   src/network/webtask.cpp
-  src/preferences/broadcastprofile.cpp
-  src/preferences/broadcastsettings.cpp
-  src/preferences/broadcastsettings_legacy.cpp
-  src/preferences/broadcastsettingsmodel.cpp
   src/preferences/configobject.cpp
   src/preferences/dialog/dlgprefautodj.cpp
   src/preferences/dialog/dlgprefautodjdlg.ui
@@ -759,8 +805,21 @@ add_library(mixxx-lib STATIC EXCLUDE_FROM_ALL
   src/skin/legacy/launchimage.cpp
   src/skin/legacy/legacyskinparser.cpp
   src/skin/legacy/pixmapsource.cpp
+  src/skin/legacy/legacyskin.cpp
+  src/skin/qml/asyncimageprovider.cpp
+  src/skin/qml/qmlcontrolproxy.cpp
+  src/skin/qml/qmlconfigproxy.cpp
+  src/skin/qml/qmleffectmanifestparametersmodel.cpp
+  src/skin/qml/qmleffectsmanagerproxy.cpp
+  src/skin/qml/qmleffectslotproxy.cpp
+  src/skin/qml/qmllibraryproxy.cpp
+  src/skin/qml/qmllibrarytracklistmodel.cpp
+  src/skin/qml/qmlplayermanagerproxy.cpp
+  src/skin/qml/qmlplayerproxy.cpp
+  src/skin/qml/qmlskin.cpp
+  src/skin/qml/qmlvisibleeffectsmodel.cpp
+  src/skin/qml/qmlwaveformoverview.cpp
   src/skin/legacy/skincontext.cpp
-  src/skin/legacy/svgparser.cpp
   src/skin/legacy/tooltips.cpp
   src/skin/skinloader.cpp
   src/soundio/sounddevice.cpp
@@ -803,7 +862,6 @@ add_library(mixxx-lib STATIC EXCLUDE_FROM_ALL
   src/track/serato/markers2.cpp
   src/track/serato/tags.cpp
   src/track/track.cpp
-  src/track/trackfile.cpp
   src/track/trackinfo.cpp
   src/track/trackmetadata.cpp
   src/track/tracknumbers.cpp
@@ -830,7 +888,7 @@ add_library(mixxx-lib STATIC EXCLUDE_FROM_ALL
   src/util/db/dbid.cpp
   src/util/db/fwdsqlquery.cpp
   src/util/db/fwdsqlqueryselectresult.cpp
-  src/util/db/sqllikewildcardescaper.cpp
+  src/util/db/sqlite.cpp
   src/util/db/sqlqueryfinisher.cpp
   src/util/db/sqlstringformatter.cpp
   src/util/db/sqltransaction.cpp
@@ -838,7 +896,9 @@ add_library(mixxx-lib STATIC EXCLUDE_FROM_ALL
   src/util/dnd.cpp
   src/util/duration.cpp
   src/util/experiment.cpp
-  src/util/file.cpp
+  src/util/fileaccess.cpp
+  src/util/fileinfo.cpp
+  src/util/imageutils.cpp
   src/util/indexrange.cpp
   src/util/logger.cpp
   src/util/logging.cpp
@@ -854,6 +914,7 @@ add_library(mixxx-lib STATIC EXCLUDE_FROM_ALL
   src/util/sandbox.cpp
   src/util/semanticversion.cpp
   src/util/screensaver.cpp
+  src/util/screensavermanager.cpp
   src/util/sleepableqthread.cpp
   src/util/stat.cpp
   src/util/statmodel.cpp
@@ -967,6 +1028,7 @@ add_library(mixxx-lib STATIC EXCLUDE_FROM_ALL
   src/widget/wrecordingduration.cpp
   src/widget/wscrollable.cpp
   src/widget/wsearchlineedit.cpp
+  src/widget/wsearchrelatedtracksmenu.cpp
   src/widget/wsingletoncontainer.cpp
   src/widget/wsizeawarestack.cpp
   src/widget/wskincolor.cpp
@@ -993,6 +1055,12 @@ set_target_properties(mixxx-lib PROPERTIES AUTOMOC ON AUTOUIC ON CXX_CLANG_TIDY 
 target_include_directories(mixxx-lib PUBLIC src "${CMAKE_CURRENT_BINARY_DIR}/src")
 if(UNIX AND NOT APPLE)
   set(MIXXX_SETTINGS_PATH ".mixxx/")
+endif()
+
+# QML Debugging
+if(CMAKE_BUILD_TYPE STREQUAL "Debug")
+  target_compile_definitions(mixxx-lib PRIVATE QT_QML_DEBUG)
+  message(STATUS "Enabling QML Debugging! This poses a security risk as Mixxx will open a TCP port for debugging")
 endif()
 
 # Disable warnings in generated source files
@@ -1039,7 +1107,7 @@ if(MSVC)
     target_compile_definitions(mixxx-lib PUBLIC _SILENCE_CXX17_ITERATOR_BASE_CLASS_DEPRECATION_WARNING _CRT_SECURE_NO_WARNINGS)
   endif()
 else()
-  target_compile_options(mixxx-lib PUBLIC -Wall -Wextra -Woverloaded-virtual -Wfloat-conversion -Werror=return-type)
+  target_compile_options(mixxx-lib PUBLIC -Wall -Wextra -Woverloaded-virtual -Wfloat-conversion -Werror=return-type -Wformat=2 -Wundef)
   if(WARNINGS_PEDANTIC)
     target_compile_options(mixxx-lib PUBLIC -pedantic)
   endif()
@@ -1137,9 +1205,6 @@ if(WIN32)
   target_link_libraries(mixxx-lib PRIVATE shell32)
 
   if(MSVC)
-    if(NOT STATIC_DEPS OR CMAKE_BUILD_TYPE STREQUAL "Debug")
-      target_link_options(mixxx-lib PUBLIC /nodefaultlib:LIBCMT.lib /nodefaultlib:LIBCMTd.lib)
-    endif()
     target_link_options(mixxx-lib PUBLIC /entry:mainCRTStartup)
     # Force MSVS to generate a manifest (MSVC2010)
     target_link_options(mixxx-lib PUBLIC /manifest)
@@ -1148,7 +1213,7 @@ elseif(UNIX)
   if(APPLE)
     target_compile_definitions(mixxx-lib PUBLIC __APPLE__)
   else()
-    target_compile_definitions(mixxx-lib PRIVATE __UNIX__)
+    target_compile_definitions(mixxx-lib PUBLIC __UNIX__)
     if(CMAKE_SYSTEM_NAME STREQUAL Linux)
       target_compile_definitions(mixxx-lib PUBLIC __LINUX__)
     elseif(CMAKE_SYSTEM_NAME MATCHES "^.*BSD$")
@@ -1299,14 +1364,6 @@ endif()
 install(
   DIRECTORY
     "${CMAKE_CURRENT_SOURCE_DIR}/res/keyboard"
-  DESTINATION
-    "${MIXXX_INSTALL_DATADIR}"
-)
-
-# QScriptEngine extensions
-install(
-  DIRECTORY
-    "${CMAKE_CURRENT_SOURCE_DIR}/script"
   DESTINATION
     "${MIXXX_INSTALL_DATADIR}"
 )
@@ -1483,6 +1540,7 @@ add_executable(mixxx-test
   src/test/beatgridtest.cpp
   src/test/beatmaptest.cpp
   src/test/beatstranslatetest.cpp
+  src/test/bpmtest.cpp
   src/test/bpmcontrol_test.cpp
   src/test/broadcastprofile_test.cpp
   src/test/broadcastsettings_test.cpp
@@ -1493,9 +1551,10 @@ add_executable(mixxx-test
   src/test/colorpalette_test.cpp
   src/test/compatibility_test.cpp
   src/test/configobject_test.cpp
-  src/test/controller_preset_validation_test.cpp
-  src/test/controllerengine_test.cpp
+  src/test/controller_mapping_validation_test.cpp
+  src/test/controllerscriptenginelegacy_test.cpp
   src/test/controlobjecttest.cpp
+  src/test/coreservicestest.cpp
   src/test/coverartcache_test.cpp
   src/test/coverartutils_test.cpp
   src/test/cratestorage_test.cpp
@@ -1515,7 +1574,11 @@ add_executable(mixxx-test
   src/test/enginemastertest.cpp
   src/test/enginemicrophonetest.cpp
   src/test/enginesynctest.cpp
+  src/test/fileinfo_test.cpp
+  src/test/frametest.cpp
   src/test/globaltrackcache_test.cpp
+  src/test/hotcuecontrol_test.cpp
+  src/test/imageutils_test.cpp
   src/test/indexrange_test.cpp
   src/test/keyutilstest.cpp
   src/test/lcstest.cpp
@@ -1731,29 +1794,120 @@ if(WIN32)
     "${CMAKE_CURRENT_BINARY_DIR}/src/mixxx.rc.include"
     "${CMAKE_CURRENT_BINARY_DIR}/src/gitinfo.h"
   )
-  # sccache fails with RC files
-  # https://github.com/mozilla/sccache/issues/947
-  if(SCCACHE_SUPPORT)
-    set_target_properties(mixxx PROPERTIES RULE_LAUNCH_COMPILE "")
-  endif()
   target_include_directories(mixxx PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
 endif()
-
-#
-# Dependencies
-#
-option(STATIC_DEPS "Link dependencies statically" OFF)
 
 # Chromaprint
 find_package(Chromaprint REQUIRED)
 target_link_libraries(mixxx-lib PRIVATE Chromaprint::Chromaprint)
-if(WIN32)
-  if(STATIC_DEPS)
-    target_compile_definitions(mixxx-lib PUBLIC CHROMAPRINT_NODLL)
+
+# Locale Aware Compare for SQLite
+find_package(SQLite3)
+# For LOCALECOMPARE we call directly sqlite functions to the database opened by
+# Qt. It only works without crashing when Mixxx links to the same sqlite
+# library as Qt.
+# This is difficult on macOS where system the SQLite can be installed and linked
+# dynamically from various locations. There is no issue in case of static
+# linking which would result in a duplicate symbol error.
+if(NOT SQLite3_FOUND)
+  set(LOCALECOMPARE_DEFAULT OFF)
+else()
+  is_static_library(SQLite3_IS_STATIC SQLite3::SQLite3)
+  if(SQLite3_IS_STATIC OR NOT APPLE)
+    set(LOCALECOMPARE_DEFAULT ON)
+  else()
+    set(LOCALECOMPARE_DEFAULT OFF)
   endif()
-   # Chromaprint is always built statically and needs fftw.
-  find_package(FFTW REQUIRED)
-  target_link_libraries(mixxx-lib PRIVATE FFTW::FFTW)
+endif()
+cmake_dependent_option(LOCALECOMPARE "Locale Aware Compare support for SQLite" ON "LOCALECOMPARE_DEFAULT" OFF)
+if(LOCALECOMPARE)
+  if(NOT SQLite3_FOUND)
+    message(FATAL_ERROR "Locale Aware Compare for SQLite requires libsqlite and its development headers.")
+  endif()
+  target_compile_definitions(mixxx-lib PUBLIC __SQLITE3__)
+  target_link_libraries(mixxx-lib PRIVATE SQLite3::SQLite3)
+elseif(SQLite3_IS_STATIC)
+  # in the static case we need to link SQLite3 uncoditionally
+  target_link_libraries(mixxx-lib PRIVATE SQLite3::SQLite3)
+endif()
+
+# Denon Engine Prime library export support (using libdjinterop)
+option(ENGINEPRIME "Support for library export to Denon Engine Prime" ON)
+if(ENGINEPRIME)
+  # Look for an existing installation of libdjinterop and use that if available.
+  # Otherwise, download and build from GitHub.
+  find_package(DjInterop)
+  if(DjInterop_FOUND)
+    # An existing installation of djinterop is available.
+    message(STATUS "Using existing system installation of libdjinterop")
+    target_include_directories(mixxx-lib PUBLIC ${DjInterop_INCLUDE_DIRS})
+    target_link_libraries(mixxx-lib PRIVATE DjInterop::DjInterop)
+  else()
+    # Fetch djinterop sources from GitHub and build them statically.
+
+    # On MacOS, Mixxx does not use system SQLite, so we will use libdjinterop's
+    # embedded SQLite in such a case.
+    if (APPLE AND NOT SQLite3_IS_STATIC)
+      message(STATUS "Building libdjinterop sources (with embedded SQLite) fetched from GitHub")
+      set(DJINTEROP_SYSTEM_SQLITE OFF)
+    else()
+      message(STATUS "Building libdjinterop sources (with system SQLite) fetched from GitHub")
+      set(DJINTEROP_SYSTEM_SQLITE ON)
+    endif()
+
+    set(DJINTEROP_INSTALL_DIR "${CMAKE_CURRENT_BINARY_DIR}/lib/libdjinterop-install")
+    set(DJINTEROP_LIBRARY "lib/${CMAKE_STATIC_LIBRARY_PREFIX}djinterop${CMAKE_STATIC_LIBRARY_SUFFIX}")
+    file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/download")
+
+    # CMake does not pass lists of paths properly to external projects.
+    # This is worked around by changing the list separator.
+    string(REPLACE ";" "|" PIPE_DELIMITED_CMAKE_PREFIX_PATH "${CMAKE_PREFIX_PATH}")
+
+    # External project sources must be downloaded as an archive into DOWNLOAD_DIR
+    # from an URL to keep offline builds like for Fedora/RPM Fusion working!
+    ExternalProject_Add(libdjinterop
+      URL "https://github.com/xsco/libdjinterop/archive/0.16.0.tar.gz"
+      URL_HASH SHA256=c998831fe4d3cc80c5c031491204244c9ed0c61575dd529260304b95d79db588
+      DOWNLOAD_DIR "${CMAKE_CURRENT_BINARY_DIR}/download/libdjinterop"
+      INSTALL_DIR ${DJINTEROP_INSTALL_DIR}
+      LIST_SEPARATOR "|"
+      CMAKE_ARGS
+        -DBUILD_SHARED_LIBS=OFF
+        -DCMAKE_SKIP_INSTALL_ALL_DEPENDENCY=ON
+        -DCMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE}
+        -DCMAKE_INSTALL_PREFIX:PATH=<INSTALL_DIR>
+        -DCMAKE_PREFIX_PATH=${PIPE_DELIMITED_CMAKE_PREFIX_PATH}
+        -DCMAKE_INSTALL_LIBDIR:PATH=lib
+        -DCMAKE_MODULE_PATH:PATH=${CMAKE_MODULE_PATH}
+        -DSYSTEM_SQLITE=${DJINTEROP_SYSTEM_SQLITE}
+      BUILD_BYPRODUCTS <INSTALL_DIR>/${DJINTEROP_LIBRARY}
+      EXCLUDE_FROM_ALL TRUE
+    )
+
+    # Assemble a library based on the external project.
+    add_library(mixxx-libdjinterop STATIC IMPORTED)
+    add_dependencies(mixxx-libdjinterop libdjinterop)
+    set(DJINTEROP_INCLUDE_DIR "${DJINTEROP_INSTALL_DIR}/include")
+    set(DJINTEROP_LIBRARY_PATH "${DJINTEROP_INSTALL_DIR}/${DJINTEROP_LIBRARY}")
+    set_target_properties(mixxx-libdjinterop PROPERTIES IMPORTED_LOCATION "${DJINTEROP_LIBRARY_PATH}")
+    target_include_directories(mixxx-lib PUBLIC ${DJINTEROP_INCLUDE_DIR})
+    target_link_libraries(mixxx-lib PRIVATE mixxx-libdjinterop)
+
+    # Since we have built libdjinterop from sources as a static library, its
+    # transitive dependencies are not automatically recognised.  libdjinterop
+    # depends on zlib and optionally sqlite3.  If libdjinterop was configured
+    # to depend on system SQLite, Mixxx will already have the dependency.
+    # But it does not have zlib, so we explicitly add that here.
+    find_package(ZLIB 1.2.8 REQUIRED)
+    target_link_libraries(mixxx-lib PRIVATE ${ZLIB_LIBRARIES})
+  endif()
+
+  # Include conditional sources only required with Engine Prime export support.
+  target_sources(mixxx-lib PRIVATE
+    src/library/export/dlglibraryexport.cpp
+    src/library/export/engineprimeexportjob.cpp
+    src/library/export/libraryexporter.cpp)
+  target_compile_definitions(mixxx-lib PUBLIC __ENGINEPRIME__)
 endif()
 
 # Ebur128
@@ -1819,6 +1973,8 @@ if(KEYFINDER)
     set(KeyFinder_INSTALL_DIR "${CMAKE_CURRENT_BINARY_DIR}/lib/keyfinder-install")
     set(KeyFinder_LIBRARY "${CMAKE_INSTALL_LIBDIR}/${CMAKE_STATIC_LIBRARY_PREFIX}keyfinder${CMAKE_STATIC_LIBRARY_SUFFIX}")
     file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/download")
+    # External project sources must be downloaded as an archive into DOWNLOAD_DIR
+    # from an URL to keep offline builds like for Fedora/RPM Fusion working!
     ExternalProject_Add(libkeyfinder
       URL "https://github.com/mixxxdj/libkeyfinder/archive/v2.2.4.zip"
       URL_HASH SHA256=cb3fea8c7213257281b6c7006b2430809f466ad8a1d485663324378d6fc0782c
@@ -1862,9 +2018,6 @@ endif()
 # FLAC
 find_package(FLAC REQUIRED)
 target_link_libraries(mixxx-lib PRIVATE FLAC::FLAC)
-if(WIN32 AND STATIC_DEPS)
-  target_compile_definitions(mixxx-lib PUBLIC FLAC__NO_DLL)
-endif()
 
 # FpClassify This is a wrapper around the fpclassify function that prevents
 # inlining It is compiled without optimization and allows to use these function
@@ -1920,8 +2073,7 @@ target_link_libraries(mixxx-lib PRIVATE Vorbis::vorbis Vorbis::vorbisenc Vorbis:
 
 # PortAudio
 find_package(PortAudio REQUIRED)
-target_include_directories(mixxx-lib SYSTEM PUBLIC ${PortAudio_INCLUDE_DIRS})
-target_link_libraries(mixxx-lib PRIVATE ${PortAudio_LIBRARIES})
+target_link_libraries(mixxx-lib PRIVATE PortAudio::PortAudio)
 
 # PortAudio Ring Buffer
 add_library(PortAudioRingBuffer STATIC EXCLUDE_FROM_ALL
@@ -1936,10 +2088,6 @@ target_include_directories(mixxx-lib SYSTEM PUBLIC ${PortMidi_INCLUDE_DIRS})
 target_link_libraries(mixxx-lib PRIVATE ${PortMidi_LIBRARIES})
 
 # Protobuf
-if(STATIC_DEPS)
-  set(Protobuf_USE_STATIC_LIBS ON)
-  mark_as_advanced(Protobuf_USE_STATIC_LIBS)
-endif()
 add_subdirectory(src/proto)
 target_link_libraries(mixxx-lib PRIVATE mixxx-proto)
 
@@ -1948,15 +2096,17 @@ target_link_libraries(mixxx-lib PRIVATE mixxx-proto)
 target_include_directories(mixxx-lib SYSTEM PUBLIC lib/rigtorp/SPSCQueue/include)
 
 # Qt
-find_package(Qt5
+find_package(QT NAMES Qt5 COMPONENTS Core REQUIRED)
+find_package(Qt${QT_VERSION_MAJOR}
   COMPONENTS
     Concurrent
     Core
     Gui
     Network
     OpenGL
-    Script
-    ScriptTools
+    PrintSupport
+    Qml
+    QuickWidgets
     Sql
     Svg
     Test
@@ -1964,33 +2114,98 @@ find_package(Qt5
     Xml
   REQUIRED
 )
+# PUBLIC is required below to find included headers
 target_link_libraries(mixxx-lib PUBLIC
-  Qt5::Concurrent
-  Qt5::Core
-  Qt5::Gui
-  Qt5::Network
-  Qt5::OpenGL
-  Qt5::Script
-  Qt5::ScriptTools
-  Qt5::Sql
-  Qt5::Svg
-  Qt5::Test
-  Qt5::Widgets
-  Qt5::Xml)
+  Qt${QT_VERSION_MAJOR}::Concurrent
+  Qt${QT_VERSION_MAJOR}::Core
+  Qt${QT_VERSION_MAJOR}::Gui
+  Qt${QT_VERSION_MAJOR}::Network
+  Qt${QT_VERSION_MAJOR}::OpenGL
+  Qt${QT_VERSION_MAJOR}::PrintSupport
+  Qt${QT_VERSION_MAJOR}::Qml
+  Qt${QT_VERSION_MAJOR}::QuickWidgets
+  Qt${QT_VERSION_MAJOR}::Sql
+  Qt${QT_VERSION_MAJOR}::Svg
+  Qt${QT_VERSION_MAJOR}::Test
+  Qt${QT_VERSION_MAJOR}::Widgets
+  Qt${QT_VERSION_MAJOR}::Xml)
 target_compile_definitions(mixxx-lib PUBLIC QT_TABLET_SUPPORT QT_USE_QSTRINGBUILDER)
-if(UNIX AND NOT APPLE)
+is_static_library(Qt_IS_STATIC Qt${QT_VERSION_MAJOR}::Core)
+if(Qt_IS_STATIC)
+  # NOTE(rryan): If you are adding a plugin here, you must also
+  # update src/mixxxapplication.cpp to define a Q_IMPORT_PLUGIN
+  # for it. Not all imageformats plugins are built as .libs when
+  # building Qt statically on Windows. Check the build environment
+  # to see exactly what's available as a standalone .lib vs linked
+  # into Qt .libs by default.
+
+  target_link_libraries(mixxx-lib PRIVATE
+    # platform plugins
+    Qt5::QOffscreenIntegrationPlugin
+    Qt5::QMinimalIntegrationPlugin
+
+    # imageformats plugins
+    Qt5::QGifPlugin
+    Qt5::QICOPlugin
+    Qt5::QJpegPlugin
+    Qt5::QSvgPlugin
+
+    # sqldrivers
+    Qt5::QSQLiteDriverPlugin
+  )
+
+  if(WIN32)
+    target_link_libraries(mixxx-lib PRIVATE
+      Qt5::QWindowsIntegrationPlugin
+      Qt5::QWindowsVistaStylePlugin
+    )
+  endif()
+
+  if(APPLE)
+    target_link_libraries(mixxx-lib PRIVATE
+      Qt5::QCocoaIntegrationPlugin
+      Qt5::QMacStylePlugin
+    )
+  endif()
+
+endif()
+
+
+if(APPLE)
+  if(Qt_IS_STATIC)
+    target_link_libraries(mixxx-lib PRIVATE
+        "-weak_framework Accelerate"
+        "-weak_framework AppKit"
+        "-weak_framework AudioToolbox"
+        "-weak_framework AudioUnit"
+        "-weak_framework AVFoundation"
+        "-weak_framework CoreAudio"
+        "-weak_framework CoreFoundation"
+        "-weak_framework CoreImage"
+        "-weak_framework CoreMedia"
+        "-weak_framework CoreMidi"
+        "-weak_framework CoreServices"
+        "-weak_framework CoreVideo"
+        "-weak_framework IOSurface"
+        "-weak_framework VideoToolbox"
+    )
+  else()
+    # Used for battery measurements and controlling the screensaver on macOS.
+    target_link_libraries(mixxx-lib PRIVATE
+        "-weak_framework IOKit"
+    )
+  endif()
+elseif(UNIX)
   find_package(X11 REQUIRED)
   find_package(Qt5 COMPONENTS X11Extras DBus REQUIRED)
   target_include_directories(mixxx-lib SYSTEM PUBLIC "${X11_INCLUDE_DIR}")
   target_link_libraries(mixxx-lib PRIVATE
     "${X11_LIBRARIES}"
-    Qt5::X11Extras
-    Qt5::DBus
+    Qt${QT_VERSION_MAJOR}::X11Extras
+    Qt${QT_VERSION_MAJOR}::DBus
   )
 elseif(WIN32)
-  get_target_property(QT5_TYPE Qt5::Core TYPE)
-  if(QT5_TYPE STREQUAL "STATIC_LIBRARY")
-    target_compile_definitions(mixxx-lib PUBLIC QT_NODLL)
+  if(Qt_IS_STATIC)
     target_link_libraries(mixxx-lib PRIVATE
       # Pulled from qt-4.8.2-source\mkspecs\win32-msvc2010\qmake.conf
       # QtCore
@@ -2015,7 +2230,6 @@ elseif(WIN32)
       # QtNetwork openssl-linked
       crypt32
 
-      # New libraries required by Qt5.
       dwmapi      # qtwindows
       iphlpapi    # qt5network
       mpr         # qt5core
@@ -2024,42 +2238,16 @@ elseif(WIN32)
       uxtheme     # ?
       version     # ?
       wtsapi32    # ?
-
-      # NOTE(rryan): If you are adding a plugin here, you must also
-      # update src/mixxxapplication.cpp to define a Q_IMPORT_PLUGIN
-      # for it. Not all imageformats plugins are built as .libs when
-      # building Qt statically on Windows. Check the build environment
-      # to see exactly what's available as a standalone .lib vs linked
-      # into Qt .libs by default.
-
-      # iconengines plugins
-      Qt5::QSvgIconPlugin
-
-      # imageformats plugins
-      Qt5::QGifPlugin
-      Qt5::QICOPlugin
-      Qt5::QJpegPlugin
-      Qt5::QSvgPlugin
-      Qt5::QTgaPlugin
-
-      # platform plugins (new in Qt5 for Windows)
-      Qt5::QWindowsIntegrationPlugin
-
-      # styles (new in Qt5 for Windows)
-      Qt5::QWindowsVistaStylePlugin
-
-      # sqldrivers (new in Qt5? or did we just start enabling them)
-      Qt5::QSQLiteDriverPlugin
     )
 
-    find_library(QT5FONTDATABASESUPPORT_LIBRARY Qt5FontDatabaseSupport)
-    target_link_libraries(mixxx-lib PRIVATE "${QT5FONTDATABASESUPPORT_LIBRARY}")
-    find_library(QT5WINDOWSUIAUTOMATIONSUPPORT_LIBRARY Qt5WindowsUIAutomationSupport)
-    target_link_libraries(mixxx-lib PRIVATE "${QT5WINDOWSUIAUTOMATIONSUPPORT_LIBRARY}")
-    find_library(QT5EVENTDISPATCHERSUPPORT_LIBRARY Qt5EventDispatcherSupport)
-    target_link_libraries(mixxx-lib PRIVATE "${QT5EVENTDISPATCHERSUPPORT_LIBRARY}")
-    find_library(QT5THEMESUPPORT_LIBRARY Qt5ThemeSupport)
-    target_link_libraries(mixxx-lib PRIVATE "${QT5THEMESUPPORT_LIBRARY}")
+    find_library(QTFONTDATABASESUPPORT_LIBRARY Qt${QT_VERSION_MAJOR}FontDatabaseSupport)
+    target_link_libraries(mixxx-lib PRIVATE "${QTFONTDATABASESUPPORT_LIBRARY}")
+    find_library(QTWINDOWSUIAUTOMATIONSUPPORT_LIBRARY Qt${QT_VERSION_MAJOR}WindowsUIAutomationSupport)
+    target_link_libraries(mixxx-lib PRIVATE "${QTWINDOWSUIAUTOMATIONSUPPORT_LIBRARY}")
+    find_library(QTEVENTDISPATCHERSUPPORT_LIBRARY Qt${QT_VERSION_MAJOR}EventDispatcherSupport)
+    target_link_libraries(mixxx-lib PRIVATE "${QTEVENTDISPATCHERSUPPORT_LIBRARY}")
+    find_library(QTTHEMESUPPORT_LIBRARY Qt${QT_VERSION_MAJOR}ThemeSupport)
+    target_link_libraries(mixxx-lib PRIVATE "${QTTHEMESUPPORT_LIBRARY}")
 
     find_library(QTFREETYPE_LIBRARY qtfreetype)
     target_link_libraries(mixxx-lib PRIVATE "${QTFREETYPE_LIBRARY}")
@@ -2077,16 +2265,6 @@ elseif(WIN32)
     )
   endif()
 endif()
-
-# QtScriptByteArray
-add_library(QtScriptByteArray STATIC EXCLUDE_FROM_ALL
-  lib/qtscript-bytearray/bytearrayclass.cpp
-  lib/qtscript-bytearray/bytearrayprototype.cpp
-)
-set_target_properties(QtScriptByteArray PROPERTIES AUTOMOC ON)
-target_link_libraries(QtScriptByteArray Qt5::Core)
-target_include_directories(mixxx-lib SYSTEM PUBLIC lib/qtscript-bytearray)
-target_link_libraries(mixxx-lib PRIVATE QtScriptByteArray)
 
 # Queen Mary DSP
 add_library(QueenMaryDsp STATIC EXCLUDE_FROM_ALL
@@ -2156,7 +2334,7 @@ if(MSVC)
   target_compile_definitions(Reverb PRIVATE _USE_MATH_DEFINES)
 endif()
 target_include_directories(Reverb PRIVATE src)
-target_link_libraries(Reverb PRIVATE Qt5::Core)
+target_link_libraries(Reverb PRIVATE Qt${QT_VERSION_MAJOR}::Core)
 target_include_directories(mixxx-lib SYSTEM PRIVATE lib/reverb)
 target_link_libraries(mixxx-lib PRIVATE Reverb)
 
@@ -2170,10 +2348,6 @@ target_link_libraries(mixxx-lib PRIVATE SndFile::sndfile)
 target_compile_definitions(mixxx-lib PUBLIC __SNDFILE__)
 if(SndFile_SUPPORTS_SET_COMPRESSION_LEVEL)
   target_compile_definitions(mixxx-lib PUBLIC SFC_SUPPORTS_SET_COMPRESSION_LEVEL)
-endif()
-if(WIN32 AND STATIC_DEPS)
-  find_package(G72X REQUIRED)
-  target_link_libraries(mixxx-lib PRIVATE G72X::G72X)
 endif()
 
 # SoundTouch
@@ -2205,36 +2379,13 @@ else()
 endif()
 
 # TagLib
-find_package(TagLib REQUIRED)
+find_package(TagLib 1.11 REQUIRED)
 target_link_libraries(mixxx-lib PRIVATE TagLib::TagLib)
-if(WIN32 AND STATIC_DEPS)
-  target_compile_definitions(mixxx-lib PUBLIC TAGLIB_STATIC)
-endif()
 
 # Threads
 set(THREADS_PREFER_PTHREAD_FLAG ON)
 find_package(Threads REQUIRED)
 target_link_libraries(mixxx-lib PRIVATE Threads::Threads)
-
-# iOS/OS X Frameworks
-if(APPLE)
-  find_library(COREFOUNDATION_LIBRARY CoreFoundation REQUIRED)
-  target_link_libraries(mixxx-lib PRIVATE ${COREFOUNDATION_LIBRARY})
-
-  # The iOS/OS X security framework is used to implement sandboxing.
-  find_library(SECURITY_LIBRARY Security REQUIRED)
-  target_link_libraries(mixxx-lib PRIVATE ${SECURITY_LIBRARY})
-
-  find_library(CORESERVICES_LIBRARY CoreServices REQUIRED)
-  target_link_libraries(mixxx-lib PRIVATE ${CORESERVICES_LIBRARY})
-
-  find_library(FOUNDATION_LIBRARY Foundation REQUIRED)
-  target_link_libraries(mixxx-lib PRIVATE ${FOUNDATION_LIBRARY})
-
-  # Used for battery measurements and controlling the screensaver on OS X and iOS.
-  find_library(IOKIT_LIBRARY IOKit REQUIRED)
-  target_link_libraries(mixxx-lib PRIVATE ${IOKIT_LIBRARY})
-endif()
 
 #
 # Features
@@ -2351,12 +2502,13 @@ endif()
 # FDK-AAC is loaded dynamically at runtime by EncoderFdkAac using QLibrary,
 # so copy it into the Windows and macOS packages, but do not link to it.
 if(APPLE AND MACOS_BUNDLE)
-  find_library(FDK_AAC_LIBRARY fdk-aac.2)
+  find_library(FDK_AAC_LIBRARY fdk-aac)
   if(FDK_AAC_LIBRARY)
     message(STATUS "Found fdk-aac: ${FDK_AAC_LIBRARY}")
-    install(FILES ${FDK_AAC_LIBRARY} DESTINATION ${MIXXX_INSTALL_PREFIX}/Contents/Frameworks)
+    file(COPY ${FDK_AAC_LIBRARY} DESTINATION "${CMAKE_CURRENT_BINARY_DIR}/lib/fdk-aac-install" FOLLOW_SYMLINK_CHAIN)
+    install(DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/lib/fdk-aac-install/" DESTINATION "${MIXXX_INSTALL_PREFIX}/Contents/Frameworks")
   else()
-    message(STATUS "Could NOT find libfdk-aac.2.dylib")
+    message(STATUS "Could NOT find libfdk-aac.dylib")
   endif()
 elseif(WIN32)
   # On Windows find_library finds the .lib file, but the installer needs the .dll file.
@@ -2485,31 +2637,21 @@ if(BROADCAST)
     src/preferences/dialog/dlgprefbroadcast.cpp
     src/broadcast/broadcastmanager.cpp
     src/engine/sidechain/shoutconnection.cpp
+    src/preferences/broadcastprofile.cpp
+    src/preferences/broadcastsettings.cpp
+    src/preferences/broadcastsettings_legacy.cpp
+    src/preferences/broadcastsettingsmodel.cpp
+    src/encoder/encoderbroadcastsettings.cpp
   )
   target_compile_definitions(mixxx-lib PUBLIC __BROADCAST__)
 endif()
 
-# Locale Aware Compare for SQLite
-find_package(SQLite3)
-# FIXME: It is difficult to get qmake to link Qt to a custom built SQLite on
-# macOS instead of the system SQLite, which results in a crash on startup when
-# LOCALECOMPARE is enabled, therefore this option is forcibly set to OFF on
-# macOS.
-cmake_dependent_option(LOCALECOMPARE "Locale Aware Compare support for SQLite" "${SQLite3_FOUND}" "NOT APPLE" OFF)
-if(LOCALECOMPARE)
-  if(NOT SQLite3_FOUND)
-    message(FATAL_ERROR "Locale Aware Compare for SQLite requires libsqlite and its development headers.")
-  endif()
-  target_compile_definitions(mixxx-lib PUBLIC __SQLITE3__)
-  target_include_directories(mixxx-lib SYSTEM PRIVATE ${SQLite3_INCLUDE_DIRS})
-  target_link_libraries(mixxx-lib PRIVATE ${SQLite3_LIBRARIES})
-endif()
-
 # Opus (RFC 6716)
+find_package(OpusFile)
 find_package(Opus)
-default_option(OPUS "Opus (RFC 6716) support" "Opus_FOUND")
+default_option(OPUS "Opus (RFC 6716) support" "OpusFile_FOUND")
 if(OPUS)
-  if(NOT Opus_FOUND)
+  if(NOT OpusFile_FOUND OR NOT Opus_FOUND)
     message(FATAL_ERROR "Opus support requires libopus and libopusfile with development headers.")
   endif()
   target_sources(mixxx-lib PRIVATE
@@ -2518,21 +2660,8 @@ if(OPUS)
     src/encoder/encoderopussettings.cpp
   )
   target_compile_definitions(mixxx-lib PUBLIC __OPUS__)
-  target_include_directories(mixxx-lib SYSTEM PUBLIC ${Opus_INCLUDE_DIRS})
-  target_link_libraries(mixxx-lib PRIVATE ${Opus_LIBRARIES})
-  if(WIN32 AND STATIC_DEPS)
-    find_package(Celt)
-    if(NOT Celt_FOUND)
-      message(FATAL_ERROR "Opus support with static dependencies requires the celt library.")
-    endif()
-    target_link_libraries(mixxx-lib PRIVATE Celt::Celt)
-
-    find_package(Silk)
-    if(NOT Silk_FOUND)
-      message(FATAL_ERROR "Opus support with static dependencies requires the silk library.")
-    endif()
-    target_link_libraries(mixxx-lib PRIVATE Silk::Float)
-  endif()
+  target_link_libraries(mixxx-lib PRIVATE OpusFile::OpusFile)
+  target_link_libraries(mixxx-lib PRIVATE Opus::Opus)
 endif()
 
 # MAD MP3 Decoder
@@ -2615,23 +2744,37 @@ if(HID)
         find_library(AppKit_LIBRARY AppKit REQUIRED)
         target_link_libraries(mixxx-hidapi PUBLIC ${AppKit_LIBRARY})
     elseif(UNIX)
-      if(NOT LibUSB_FOUND)
-        message(FATAL_ERROR "USB HID controller support on Unix with statically linked libhidapi-libusb requires libusb 1.0 and its development headers.")
+      if(CMAKE_SYSTEM_NAME STREQUAL Linux)
+        find_library(libudev_LIBRARY udev REQUIRED)
+        target_sources(mixxx-hidapi PRIVATE lib/hidapi/linux/hid.c)
+        target_link_libraries(mixxx-hidapi PRIVATE ${libudev_LIBRARY})
+      else()
+        if(NOT LibUSB_FOUND)
+          message(FATAL_ERROR "USB HID controller support on Unix with statically linked libhidapi-libusb requires libusb 1.0 and its development headers.")
+        endif()
+        target_sources(mixxx-hidapi PRIVATE lib/hidapi/libusb/hid.c)
+        target_link_libraries(mixxx-hidapi PRIVATE LibUSB::LibUSB)
       endif()
-      target_sources(mixxx-hidapi PRIVATE lib/hidapi/libusb/hid.c)
-      target_link_libraries(mixxx-hidapi PRIVATE LibUSB::LibUSB)
     else()
       message(FATAL_ERROR "USB HID controller support only possible on Windows/Mac OS/Linux/BSD.")
     endif()
     target_link_libraries(mixxx-lib PRIVATE mixxx-hidapi)
   else()
-    target_link_libraries(mixxx-lib PRIVATE hidapi::hidapi)
+    # hidapi has two backends on Linux, one using the kernel's hidraw API and one using libusb.
+    # libusb obviously does not support Bluetooth HID devices, so use the hidraw backend. The
+    # libusb backend is the default, so hidraw needs to be selected explicitly at link time.
+    if(CMAKE_SYSTEM_NAME STREQUAL Linux)
+      target_link_libraries(mixxx-lib PRIVATE hidapi::hidraw)
+    else()
+      target_link_libraries(mixxx-lib PRIVATE hidapi::hidapi)
+    endif()
   endif()
   target_sources(mixxx-lib PRIVATE
     src/controllers/hid/hidcontroller.cpp
+    src/controllers/hid/hiddevice.cpp
     src/controllers/hid/hidenumerator.cpp
-    src/controllers/hid/hidcontrollerpreset.cpp
-    src/controllers/hid/hidcontrollerpresetfilehandler.cpp
+    src/controllers/hid/legacyhidcontrollermapping.cpp
+    src/controllers/hid/legacyhidcontrollermappingfilehandler.cpp
   )
   target_compile_definitions(mixxx-lib PUBLIC __HID__)
 endif()
@@ -2648,8 +2791,8 @@ if(BULK)
   )
   if(NOT HID)
     target_sources(mixxx-lib PRIVATE
-      src/controllers/hid/hidcontrollerpreset.cpp
-      src/controllers/hid/hidcontrollerpresetfilehandler.cpp
+      src/controllers/hid/legacyhidcontrollermapping.cpp
+      src/controllers/hid/legacyhidcontrollermappingfilehandler.cpp
     )
   endif()
   target_compile_definitions(mixxx-lib PUBLIC __BULK__)
@@ -2737,7 +2880,8 @@ set(CPACK_DEBIAN_PACKAGE_SECTION "sound")
 set(CPACK_DEBIAN_PACKAGE_PRIORITY "optional")
 set(CPACK_DEBIAN_PACKAGE_SUGGESTS "pdf-viewer, pulseaudio-utils")
 set(CPACK_DEBIAN_PACKAGE_REPLACES "mixxx-data")
-set(CPACK_DEBIAN_PACKAGE_DEPENDS "libqt5sql5-sqlite, fonts-open-sans, fonts-ubuntu")
+set(CPACK_DEBIAN_PACKAGE_DEPENDS "libqt5sql5-sqlite, fonts-open-sans, fonts-ubuntu,\
+ qml-module-qtquick-controls, qml-module-qtquick-controls2, qml-module-qt-labs-qmlmodels, qml-module-qtquick-shapes")
 set(CPACK_DEBIAN_PACKAGE_SHLIBDEPS ON)
 set(CPACK_DEBIAN_PACKAGE_HOMEPAGE "${CPACK_PACKAGE_HOMEPAGE_URL}")
 set(CPACK_DEBIAN_PACKAGE_CONTROL_STRICT_PERMISSION TRUE)
@@ -2753,7 +2897,7 @@ if (NOT CPACK_DEBIAN_PACKAGE_RELEASE)
    set(CPACK_DEBIAN_PACKAGE_RELEASE 1)
 endif()
 
-set(CPACK_DEBIAN_DISTRIBUTION_RELEASES bionic focal hirsute impish)
+set(CPACK_DEBIAN_DISTRIBUTION_RELEASES focal hirsute impish)
 set(CPACK_DEBIAN_SOURCE_DIR ${CMAKE_SOURCE_DIR})
 set(CPACK_DEBIAN_UPLOAD_PPA_SCRIPT "${CMAKE_CURRENT_SOURCE_DIR}/packaging/CPackDebUploadPPA.cmake")
 set(CPACK_DEBIAN_INSTALL_SCRIPT "${CMAKE_CURRENT_SOURCE_DIR}/packaging/CPackDebInstall.cmake")
@@ -2770,33 +2914,8 @@ set(CPACK_PROJECT_CONFIG_FILE "${CMAKE_SOURCE_DIR}/packaging/CPackConfig.cmake" 
 include(CPack)
 
 if(APPLE AND MACOS_BUNDLE)
-    macro(install_qt5_plugin _qt_plugin_name _qt_plugins_var _prefix)
-        get_target_property(_qt_plugin_path "${_qt_plugin_name}" LOCATION)
-        if(EXISTS "${_qt_plugin_path}")
-            get_filename_component(_qt_plugin_file "${_qt_plugin_path}" NAME)
-            get_filename_component(_qt_plugin_type "${_qt_plugin_path}" PATH)
-            get_filename_component(_qt_plugin_type "${_qt_plugin_type}" NAME)
-            set(_qt_plugin_dest "${_prefix}/Contents/PlugIns/${_qt_plugin_type}")
-            install(FILES "${_qt_plugin_path}"
-                DESTINATION "${_qt_plugin_dest}")
-            set(${_qt_plugins_var}
-                "${${_qt_plugins_var}};\$ENV{DEST_DIR}\${CMAKE_INSTALL_PREFIX}/${_qt_plugin_dest}/${_qt_plugin_file}")
-        else()
-            message(FATAL_ERROR "QT plugin ${_qt_plugin_name} not found")
-        endif()
-    endmacro()
-
-
-    install_qt5_plugin(Qt5::QCocoaIntegrationPlugin BUNDLE_LIBS "${MIXXX_INSTALL_PREFIX}")
-    install_qt5_plugin(Qt5::QSQLiteDriverPlugin BUNDLE_LIBS "${MIXXX_INSTALL_PREFIX}")
-    install_qt5_plugin(Qt5::QMacStylePlugin BUNDLE_LIBS "${MIXXX_INSTALL_PREFIX}")
-    install_qt5_plugin(Qt5::QSvgPlugin BUNDLE_LIBS "${MIXXX_INSTALL_PREFIX}")
-    install_qt5_plugin(Qt5::QSvgIconPlugin BUNDLE_LIBS "${MIXXX_INSTALL_PREFIX}")
-    install_qt5_plugin(Qt5::QJpegPlugin BUNDLE_LIBS "${MIXXX_INSTALL_PREFIX}")
-    install_qt5_plugin(Qt5::QGifPlugin BUNDLE_LIBS "${MIXXX_INSTALL_PREFIX}")
-
     set(BUNDLE_NAME "${MIXXX_INSTALL_PREFIX}")
-    set(BUNDLE_DIRS "${CMAKE_PREFIX_PATH}/lib;${Qt5Widgets_DIR}/../..")
+    set(BUNDLE_DIRS "${CMAKE_PREFIX_PATH}/lib")
     set(APPLE_CODESIGN_ENTITLEMENTS "${CMAKE_CURRENT_SOURCE_DIR}/packaging/macos/entitlements.plist")
 
     configure_file(cmake/modules/BundleInstall.cmake.in "${CMAKE_CURRENT_BINARY_DIR}/BundleInstall.cmake" @ONLY)
